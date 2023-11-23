@@ -1,0 +1,338 @@
+---
+steps:
+- commands:
+  - "# `restore_cache` not implemented yet"
+  - "# No need for checkout, the agent takes care of that"
+  - echo '~~~ remove empty directories from the packages dir'
+  - find ./packages -mindepth 1 -maxdepth 1 -type d '!' -exec test -e "{}/package.json"
+    ';' -print \
+  - "  | xargs --no-run-if-empty rm -r"
+  - echo '~~~ verify that the license header is prepended to the non eslint'd source
+    files'
+  - build_utils/verify_license_header.sh
+  - yarn config set ignore-engines true
+  - yarn config set cache-folder /mnt/ramdisk/yarn-cache
+  - yarn install --force || yarn
+  - echo '~~~ ensure yarn.lock file is up to date'
+  - "! git diff --name-only | grep yarn.lock"
+  - echo '~~~ fix eslint cache'
+  - yarn lerna exec ../../build_utils/fix_eslint_cache.sh
+  - yarn build
+  - cd .
+  - buildkite-agent artifact upload '*'
+  - cd -
+  - cd /mnt/ramdisk/project
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/node:18.12
+  agents:
+    resource_class: xlarge
+    executor_type: docker
+  key: build
+- commands:
+  - "# :circleci: attach_workspace "
+  - if [ ! -d '.' ]; then mkdir '.'; fi
+  - cd '.'
+  - buildkite agent artifact download *
+  - "# `save_cache` not implemented yet"
+  depends_on:
+  - build
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/base:2020.01
+  agents:
+    executor_type: docker
+  key: save_project_cache
+- commands:
+  - "# :circleci: attach_workspace "
+  - if [ ! -d '.' ]; then mkdir '.'; fi
+  - cd '.'
+  - buildkite agent artifact download *
+  - echo '~~~ Run unit tests'
+  - (
+  - JEST_JUNIT_OUTPUT_DIR='reports/unittests' FORCE_COLOR='1'
+  - yarn test -w 4 --reporters=default --reporters=jest-junit
+  - )
+  - "# `store_test_results` has no direct translation (you should try Test Analytics!)"
+  - "# coveralls/upload is part of orb coveralls which is not supported and should
+    be translated by hand"
+  - cd /mnt/ramdisk/project
+  depends_on:
+  - build
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/node:18.12
+  agents:
+    resource_class: xlarge
+    executor_type: docker
+  key: unit_test
+- commands:
+  - "# :circleci: attach_workspace "
+  - if [ ! -d '.' ]; then mkdir '.'; fi
+  - cd '.'
+  - buildkite agent artifact download *
+  - echo '~~~ configure sources.list'
+  - if curl -sL https://salto-cli-releases.s3.eu-central-1.amazonaws.com/build_artifacts/apt/sources.list
+    -o /tmp/sources.list; then
+  - '  echo "found sources.list file"'
+  - "  sudo mv /tmp/sources.list /etc/apt/sources.list"
+  - "  sudo apt update"
+  - else
+  - '  echo "did not find sources.list file, using the default one"'
+  - fi
+  - echo "using sources.list:"
+  - cat /etc/apt/sources.list
+  - echo '~~~ Run E2E tests'
+  - "# no_output_timeout option has no translation"
+  - (
+  - RUN_E2E_TESTS='1' SALTO_LOG_LEVEL='info' SALTO_TELEMETRY_DISABLE='0' SALTO_TELEMETRY_URL='https://telemetry.salto.io'
+    JEST_JUNIT_OUTPUT_DIR='reports/e2e/'
+  - yarn test --reporters=default --reporters=jest-junit --coverage=false
+  - )
+  - "# `store_test_results` has no direct translation (you should try Test Analytics!)"
+  - cd /mnt/ramdisk/project
+  depends_on:
+  - build
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/openjdk:17.0.5-node
+  agents:
+    resource_class: large
+    executor_type: docker
+  key: e2e_test
+- commands:
+  - echo '~~~ Set S3 URLs according to date and git hash'
+  - (
+  - GIT_REVISION='<< pipeline.git.revision >>' PIPELINE_NUMBER='<< pipeline.number
+    >>'
+  - echo "export S3_PKG_BUCKET=salto-cli-releases" >> $BASH_ENV
+  - echo "export PKG_PREFIX=${GIT_REVISION:0:8}_${PIPELINE_NUMBER}" >> $BASH_ENV
+  - source $BASH_ENV
+  - echo "export S3_PKG_HASH_PREFIX=s3://${S3_PKG_BUCKET}/${CIRCLE_BRANCH}/${PKG_PREFIX}"
+    >> $BASH_ENV
+  - source $BASH_ENV
+  - )
+  - "# aws-s3/copy is part of orb aws-s3 which is not supported and should be translated
+    by hand"
+  - chmod +x ./salto
+  - echo '~~~ run CLI --help'
+  - "./salto --help"
+  - echo '~~~ Test CLI init'
+  - mkdir workspace && cd workspace && ../salto init -e env1
+  depends_on:
+  - package_cli
+  agents:
+    executor_type: osx
+    executor_xcode: 14.2.0
+  key: test_cli_mac
+- commands:
+  - echo '~~~ Set S3 URLs according to date and git hash'
+  - (
+  - GIT_REVISION='<< pipeline.git.revision >>' PIPELINE_NUMBER='<< pipeline.number
+    >>'
+  - echo "export S3_PKG_BUCKET=salto-cli-releases" >> $BASH_ENV
+  - echo "export PKG_PREFIX=${GIT_REVISION:0:8}_${PIPELINE_NUMBER}" >> $BASH_ENV
+  - source $BASH_ENV
+  - echo "export S3_PKG_HASH_PREFIX=s3://${S3_PKG_BUCKET}/${CIRCLE_BRANCH}/${PKG_PREFIX}"
+    >> $BASH_ENV
+  - source $BASH_ENV
+  - )
+  - "# aws-cli/install is part of orb aws-cli which is not supported and should be
+    translated by hand"
+  - "# aws-cli/setup is part of orb aws-cli which is not supported and should be translated
+    by hand"
+  - "# aws-s3/copy is part of orb aws-s3 which is not supported and should be translated
+    by hand"
+  - chmod +x ./salto
+  - echo '~~~ run CLI --help'
+  - "./salto --help"
+  - echo '~~~ Test CLI init'
+  - mkdir workspace && cd workspace && ../salto init -e env1
+  depends_on:
+  - package_cli
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/node:18.12
+  agents:
+    executor_type: docker
+  key: test_cli_linux
+- commands:
+  - echo '~~~ Set S3 URLs according to date and git hash'
+  - (
+  - GIT_REVISION='<< pipeline.git.revision >>' PIPELINE_NUMBER='<< pipeline.number
+    >>'
+  - echo "export S3_PKG_BUCKET=salto-cli-releases" >> $BASH_ENV
+  - echo "export PKG_PREFIX=${GIT_REVISION:0:8}_${PIPELINE_NUMBER}" >> $BASH_ENV
+  - source $BASH_ENV
+  - echo "export S3_PKG_HASH_PREFIX=s3://${S3_PKG_BUCKET}/${CIRCLE_BRANCH}/${PKG_PREFIX}"
+    >> $BASH_ENV
+  - source $BASH_ENV
+  - )
+  - "# aws-s3/copy is part of orb aws-s3 which is not supported and should be translated
+    by hand"
+  - echo '~~~ run CLI --help'
+  - "./salto.exe --help"
+  - echo '~~~ Test CLI init'
+  - mkdir workspace && cd workspace && ../salto.exe init -e env1
+  - '# executor {"name"=>"win/default", "shell"=>"bash.exe"} not supported yet'
+  depends_on:
+  - package_cli
+  key: test_cli_win
+- commands:
+  - "# :circleci: attach_workspace "
+  - if [ ! -d '.' ]; then mkdir '.'; fi
+  - cd '.'
+  - buildkite agent artifact download *
+  - echo '~~~ Build native executables'
+  - (
+  - PYTHON='/usr/bin/python3'
+  - yarn workspace @salto-io/cli package
+  - )
+  - "# aws-cli/install is part of orb aws-cli which is not supported and should be
+    translated by hand"
+  - "# aws-cli/setup is part of orb aws-cli which is not supported and should be translated
+    by hand"
+  - echo '~~~ Set S3 URLs according to date and git hash'
+  - (
+  - GIT_REVISION='<< pipeline.git.revision >>' PIPELINE_NUMBER='<< pipeline.number
+    >>'
+  - echo "export S3_PKG_BUCKET=salto-cli-releases" >> $BASH_ENV
+  - echo "export PKG_PREFIX=${GIT_REVISION:0:8}_${PIPELINE_NUMBER}" >> $BASH_ENV
+  - source $BASH_ENV
+  - echo "export S3_PKG_HASH_PREFIX=s3://${S3_PKG_BUCKET}/${CIRCLE_BRANCH}/${PKG_PREFIX}"
+    >> $BASH_ENV
+  - source $BASH_ENV
+  - )
+  - "# `store_artifacts` not implemented yet"
+  - "# aws-s3/sync is part of orb aws-s3 which is not supported and should be translated
+    by hand"
+  depends_on:
+  - build
+  - unit_test
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/node:18.12
+  agents:
+    executor_type: docker
+  key: package_cli
+- commands:
+  - "# :circleci: attach_workspace "
+  - if [ ! -d '.' ]; then mkdir '.'; fi
+  - cd '.'
+  - buildkite agent artifact download *
+  - echo '~~~ Create a VSIX file'
+  - yarn workspace salto-vscode package
+  - "# aws-cli/install is part of orb aws-cli which is not supported and should be
+    translated by hand"
+  - "# aws-cli/setup is part of orb aws-cli which is not supported and should be translated
+    by hand"
+  - echo '~~~ Set S3 URLs according to date and git hash'
+  - (
+  - GIT_REVISION='<< pipeline.git.revision >>' PIPELINE_NUMBER='<< pipeline.number
+    >>'
+  - echo "export S3_PKG_BUCKET=salto-cli-releases" >> $BASH_ENV
+  - echo "export PKG_PREFIX=${GIT_REVISION:0:8}_${PIPELINE_NUMBER}" >> $BASH_ENV
+  - source $BASH_ENV
+  - echo "export S3_PKG_HASH_PREFIX=s3://${S3_PKG_BUCKET}/${CIRCLE_BRANCH}/${PKG_PREFIX}"
+    >> $BASH_ENV
+  - source $BASH_ENV
+  - )
+  - "# `store_artifacts` not implemented yet"
+  - "# aws-s3/sync is part of orb aws-s3 which is not supported and should be translated
+    by hand"
+  depends_on:
+  - build
+  - unit_test
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/node:18.12
+  agents:
+    executor_type: docker
+  key: package_vscode_extension
+- commands:
+  - echo '~~~ Set S3 URLs according to date and git hash'
+  - (
+  - GIT_REVISION='<< pipeline.git.revision >>' PIPELINE_NUMBER='<< pipeline.number
+    >>'
+  - echo "export S3_PKG_BUCKET=salto-cli-releases" >> $BASH_ENV
+  - echo "export PKG_PREFIX=${GIT_REVISION:0:8}_${PIPELINE_NUMBER}" >> $BASH_ENV
+  - source $BASH_ENV
+  - echo "export S3_PKG_HASH_PREFIX=s3://${S3_PKG_BUCKET}/${CIRCLE_BRANCH}/${PKG_PREFIX}"
+    >> $BASH_ENV
+  - source $BASH_ENV
+  - )
+  - "# aws-s3/sync is part of orb aws-s3 which is not supported and should be translated
+    by hand"
+  - echo '~~~ Create a marker file with the git hash'
+  - touch ./PACKAGED_FROM.${PKG_PREFIX}
+  - "# aws-s3/copy is part of orb aws-s3 which is not supported and should be translated
+    by hand"
+  depends_on:
+  - package_cli
+  - package_vscode_extension
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/python:3.10
+  agents:
+    executor_type: docker
+  key: sync_s3_pkg_latest
+- commands:
+  - "# :circleci: attach_workspace "
+  - if [ ! -d '.' ]; then mkdir '.'; fi
+  - cd '.'
+  - buildkite agent artifact download *
+  - echo '~~~ Set NPM token'
+  - "# set token at npmrc - without making the git local copy dirty"
+  - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >> .npmrc
+  - echo ".npmrc" >> .git/info/exclude
+  - git update-index --assume-unchanged .npmrc
+  - echo '~~~ Set git identity'
+  - "# version git commit is not pushed, so this just needs to be configured"
+  - git config user.email "$(git log -1 --format='%ae')"
+  - git config user.name "$(git log -1 --format='%an')"
+  - echo '~~~ Publish canary version'
+  - ".circleci/scripts/publish-canary.sh"
+  depends_on:
+  - build
+  - unit_test
+  - e2e_test
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/node:18.12
+  agents:
+    executor_type: docker
+  key: publish_canary
+- commands:
+  - "# :circleci: attach_workspace "
+  - if [ ! -d '.' ]; then mkdir '.'; fi
+  - cd '.'
+  - buildkite agent artifact download *
+  - "# `add_ssh_keys` has no translation, your agent should have the keys to connect
+    where it needs to"
+  - echo '~~~ Set S3 URLs according to date and git hash'
+  - (
+  - GIT_REVISION='<< pipeline.git.revision >>' PIPELINE_NUMBER='<< pipeline.number
+    >>'
+  - echo "export S3_PKG_BUCKET=salto-cli-releases" >> $BASH_ENV
+  - echo "export PKG_PREFIX=${GIT_REVISION:0:8}_${PIPELINE_NUMBER}" >> $BASH_ENV
+  - source $BASH_ENV
+  - echo "export S3_PKG_HASH_PREFIX=s3://${S3_PKG_BUCKET}/${CIRCLE_BRANCH}/${PKG_PREFIX}"
+    >> $BASH_ENV
+  - source $BASH_ENV
+  - )
+  - "# aws-cli/install is part of orb aws-cli which is not supported and should be
+    translated by hand"
+  - "# aws-cli/setup is part of orb aws-cli which is not supported and should be translated
+    by hand"
+  - echo '~~~ Release version'
+  - "./.circleci/scripts/release_version.sh << pipeline.git.base_revision >>"
+  depends_on:
+  - build
+  - unit_test
+  - e2e_test
+  plugins:
+  - docker#v5.7.0:
+      image: cimg/node:18.12
+  agents:
+    executor_type: docker
+  key: publish_on_version_change
